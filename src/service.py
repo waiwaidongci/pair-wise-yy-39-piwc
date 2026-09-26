@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import ConflictError, ensure_role, normalize_severity, require_number, require_text
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, GATED_TRANSITIONS,
+                    PLAN_CONFIRM_ROLES, PLAN_SAVE_ROLES, RECORD_ROLES, TITLE,
                     VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+                    plan_gate_blockers, priority_score, response_deadline_hours,
+                    role_for_transition, validate_transition)
 
 
 class Service:
@@ -65,15 +66,80 @@ class Service:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
+        escalation = escalation_required(
+            item["severity"], item["quantity"], item["threshold"])
+        gated = (item["status"], target) in GATED_TRANSITIONS and escalation
+        summary = None
+        if gated:
+            summary = self._plan_summary(item_id)
+            blockers = plan_gate_blockers(
+                True, summary["version"],
+                {c["role"] for c in summary["confirmations"]})
+            if blockers:
+                raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
             "from": item["status"], "to": target,
-            "escalation_required": escalation_required(
-                item["severity"], item["quantity"], item["threshold"]),
+            "escalation_required": escalation,
         })
+        if gated:
+            self.repository.append_audit("release", ENTITY, item_id, actor, {
+                "from": item["status"], "to": target,
+                "plan_version": summary["version"],
+                "confirmed_by": [c["actor"] for c in summary["confirmations"]],
+            })
         return self.enrich(updated)
+
+    def save_plan(self, item_id: int, payload: Dict[str, Any], actor: str,
+                  role: str) -> Dict[str, Any]:
+        ensure_role(role, PLAN_SAVE_ROLES)
+        actor = require_text(actor, "actor", 100)
+        steps = require_text(payload.get("steps"), "steps")
+        evacuation_scope = require_text(payload.get("evacuation_scope"), "evacuation_scope", 500)
+        self.repository.get_item(item_id)
+        plan = self.repository.create_plan_version(item_id, steps, evacuation_scope, actor)
+        self.repository.append_audit("plan_save", ENTITY, item_id, actor, {
+            "plan_version": plan["version"], "steps": steps,
+            "evacuation_scope": evacuation_scope,
+        })
+        return self._plan_summary(item_id)
+
+    def confirm_plan(self, item_id: int, actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, PLAN_CONFIRM_ROLES)
+        actor = require_text(actor, "actor", 100)
+        self.repository.get_item(item_id)
+        plan = self.repository.get_current_plan(item_id)
+        if plan is None:
+            raise ConflictError("尚未保存应急预案，无法确认")
+        self.repository.confirm_plan(item_id, plan["version"], role, actor)
+        self.repository.append_audit("plan_confirm", ENTITY, item_id, actor, {
+            "plan_version": plan["version"], "role": role,
+        })
+        return self._plan_summary(item_id)
+
+    def plan_status(self, item_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        self.repository.get_item(item_id)
+        return self._plan_summary(item_id)
+
+    def _plan_summary(self, item_id: int) -> Dict[str, Any]:
+        plan = self.repository.get_current_plan(item_id)
+        confirmations = (self.repository.list_confirmations(item_id, plan["version"])
+                         if plan else [])
+        confirmed_roles = {c["role"] for c in confirmations}
+        pending = [r for r in PLAN_CONFIRM_ROLES if r not in confirmed_roles]
+        return {
+            "version": plan["version"] if plan else None,
+            "steps": plan["steps"] if plan else None,
+            "evacuation_scope": plan["evacuation_scope"] if plan else None,
+            "updated_by": plan["created_by"] if plan else None,
+            "updated_at": plan["created_at"] if plan else None,
+            "confirmations": [{"role": c["role"], "actor": c["actor"],
+                               "created_at": c["created_at"]} for c in confirmations],
+            "pending_roles": pending,
+            "complete": plan is not None and not pending,
+        }
 
     def get_item(self, item_id: int, role: str) -> Dict[str, Any]:
         self._view(role)
@@ -91,8 +157,7 @@ class Service:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
 
-    @staticmethod
-    def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
+    def enrich(self, item: Dict[str, Any]) -> Dict[str, Any]:
         result = dict(item)
         result["priority"] = priority_score(
             item["severity"], item["quantity"], item["threshold"])
@@ -100,4 +165,10 @@ class Service:
             item["severity"], item["quantity"], item["threshold"])
         result["escalation_required"] = escalation_required(
             item["severity"], item["quantity"], item["threshold"])
+        summary = self._plan_summary(item["id"])
+        result["plan"] = summary
+        result["repair_blockers"] = (
+            plan_gate_blockers(result["escalation_required"], summary["version"],
+                               {c["role"] for c in summary["confirmations"]})
+            if item["status"] == "defect_confirmed" else [])
         return result

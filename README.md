@@ -30,9 +30,18 @@ python3 app.py --db ./data.db --port 8316
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `GET /api/items/{id}/plan`，查看当前预案版本、确认进度和待确认角色
+- `POST /api/items/{id}/plan`，应急管理员保存新预案版本（处置步骤+撤离范围）
+- `POST /api/items/{id}/plan/confirm`，巡检员或坝工确认当前预案版本
 - `GET /api/audit`
 
 允许角色：inspector, dam_engineer, emergency_manager, viewer。异常值比控制阈值越高，缺陷优先级越高；应急处置缺陷必须完成复检并记录证据后才能关闭。
+
+## 应急预案闸门
+
+- 应急管理员保存预案时自动生成递增版本号；再次保存后，旧版本上的确认全部失效，页面会显示哪些角色还未确认当前版本。
+- 达到阈值的缺陷（`escalation_required`）只有在巡检员、坝工都确认当前预案版本后，才能从`defect_confirmed`转入`repair`；普通缺陷仍走原流程。
+- 每次预案改版（`plan_save`）、确认（`plan_confirm`）和放行（`release`）都会写入哈希链审计；缺陷详情返回`plan`（版本、确认进度、待确认角色）和`repair_blockers`（阻挡原因）。
 
 ## 测试
 

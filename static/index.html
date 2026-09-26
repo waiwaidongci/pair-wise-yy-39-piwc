@@ -1,1 +1,72 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>大坝巡检、缺陷与应急管理</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>大坝巡检、缺陷与应急管理</h1><p>安排巡检，记录渗流、位移、裂缝等缺陷并跟踪修复、复检和应急预案</p><p>异常值比控制阈值越高，缺陷优先级越高；应急处置缺陷必须完成复检并记录证据后才能关闭。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>大坝巡检、缺陷与应急管理</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17212b}
+pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.45rem .9rem;margin:.15rem}input,select,textarea{padding:.4rem;margin:.15rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0}td,th{border:1px solid #d5dde5;padding:.4rem .6rem;text-align:left;font-size:.9rem}
+.card{border:1px solid #d5dde5;border-radius:8px;padding:1rem;margin:1rem 0}.warn{color:#b3261e}.ok{color:#1a7f37}.muted{color:#5b6b7b}
+</style></head><body>
+<h1>大坝巡检、缺陷与应急管理</h1>
+<p>安排巡检，记录渗流、位移、裂缝等缺陷并跟踪修复、复检和应急预案。达到阈值的缺陷须应急预案经巡检员、坝工双确认后才能转入修复。</p>
+<div class="card">
+身份：<input id="actor" value="demo" size="8">
+角色：<select id="role"><option>viewer</option><option>inspector</option><option>dam_engineer</option><option>emergency_manager</option></select>
+<button onclick="loadItems()">刷新列表</button>
+</div>
+<div id="items"></div>
+<div id="detail"></div>
+<pre id="out"></pre>
+<script>
+const H=()=>({'X-Actor':document.getElementById('actor').value,'X-Role':document.getElementById('role').value,'Content-Type':'application/json'});
+const RL={inspector:'巡检员',dam_engineer:'坝工',emergency_manager:'应急管理员',viewer:'访客'};
+function show(x){document.getElementById('out').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}
+async function api(path,opts){const r=await fetch(path,{...opts,headers:H()});const j=await r.json();if(!r.ok)show(j);return{ok:r.ok,data:j}}
+async function loadItems(){
+  const{data}=await api('/api/items');
+  let h='<table><tr><th>ID</th><th>标题</th><th>状态</th><th>达到阈值</th><th>预案版本</th><th>待确认</th><th></th></tr>';
+  for(const it of data.items){
+    const p=it.plan||{};
+    h+=`<tr><td>${it.id}</td><td>${it.title}</td><td>${it.status}</td><td>${it.escalation_required?'是':'否'}</td>`+
+       `<td>${p.version??'<span class=muted>未保存</span>'}</td>`+
+       `<td>${p.pending_roles?.length?'<span class=warn>'+p.pending_roles.map(r=>RL[r]).join('、')+'</span>':'<span class=ok>已齐</span>'}</td>`+
+       `<td><button onclick="loadDetail(${it.id})">详情</button></td></tr>`;
+  }
+  document.getElementById('items').innerHTML=h+'</table>';
+}
+async function loadDetail(id){
+  const{data:it}=await api('/api/items/'+id);if(!it.id)return;
+  const p=it.plan||{};
+  const confs=(p.confirmations||[]).map(c=>`${RL[c.role]} ${c.actor}（${c.created_at}）`).join('<br>')||'<span class=muted>无</span>';
+  const blockers=(it.repair_blockers||[]).map(b=>`<li class=warn>${b}</li>`).join('');
+  let h=`<div class=card><h3>缺陷 #${it.id} ${it.title}</h3>
+  <p>状态：${it.status}　版本：${it.version}　达到阈值：${it.escalation_required?'是':'否'}</p>
+  <h4>应急预案（当前版本：${p.version??'未保存'}）</h4>
+  <p>处置步骤：${p.steps??'<span class=muted>—</span>'}<br>撤离范围：${p.evacuation_scope??'<span class=muted>—</span>'}<br>
+  <span class=muted>保存人：${p.updated_by??'—'}　${p.updated_at??''}</span></p>
+  <p>确认进度：${p.complete?'<span class=ok>两人均已确认</span>':'<span class=warn>未确认：'+(p.pending_roles||[]).map(r=>RL[r]).join('、')+'</span>'}<br>${confs}</p>
+  ${blockers?'<p>转入修复被阻挡：</p><ul>'+blockers+'</ul>':''}
+  <p>
+  <button onclick="savePlan(${it.id})">保存新预案版本</button>
+  <button onclick="confirmPlan(${it.id})">确认当前版本</button>
+  <button onclick="go(${it.id},${it.version},'inspected')">→inspected</button>
+  <button onclick="go(${it.id},${it.version},'defect_confirmed')">→defect_confirmed</button>
+  <button onclick="go(${it.id},${it.version},'repair')">→repair</button>
+  <button onclick="go(${it.id},${it.version},'verified')">→verified</button>
+  <button onclick="go(${it.id},${it.version},'closed')">→closed</button>
+  </p></div>`;
+  document.getElementById('detail').innerHTML=h;
+}
+async function savePlan(id){
+  const steps=prompt('处置步骤');if(!steps)return;
+  const scope=prompt('撤离范围');if(!scope)return;
+  const{ok,data}=await api(`/api/items/${id}/plan`,{method:'POST',body:JSON.stringify({steps,evacuation_scope:scope})});
+  show(data);if(ok)loadDetail(id);
+}
+async function confirmPlan(id){
+  const{ok,data}=await api(`/api/items/${id}/plan/confirm`,{method:'POST',body:'{}'});
+  show(data);if(ok)loadDetail(id);
+}
+async function go(id,version,target){
+  const{ok,data}=await api(`/api/items/${id}/transition`,{method:'POST',body:JSON.stringify({target,expected_version:version})});
+  show(data);loadDetail(id);loadItems();
+}
+loadItems();
+</script></body></html>
