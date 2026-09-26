@@ -1,1 +1,169 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>大坝巡检、缺陷与应急管理</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>大坝巡检、缺陷与应急管理</h1><p>安排巡检，记录渗流、位移、裂缝等缺陷并跟踪修复、复检和应急预案</p><p>异常值比控制阈值越高，缺陷优先级越高；应急处置缺陷必须完成复检并记录证据后才能关闭。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>大坝巡检、缺陷与应急管理</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;color:#17212b}
+fieldset{border:1px solid #d5dde3;border-radius:6px;margin-bottom:1rem}
+button{padding:.45rem .9rem;margin:.15rem .15rem .15rem 0;cursor:pointer}
+input,select,textarea{padding:.4rem;margin:.15rem .3rem .15rem 0;box-sizing:border-box}
+textarea{width:100%;min-height:3.2rem}
+table{border-collapse:collapse;width:100%}
+td,th{border:1px solid #e1e7ec;padding:.35rem .5rem;text-align:left;font-size:.92rem}
+tr[data-id]{cursor:pointer}tr[data-id]:hover{background:#f0f5f9}
+.card{border:1px solid #d5dde3;border-radius:6px;padding:.8rem 1rem;margin-bottom:1rem}
+.ok{color:#0a7a3d}.bad{color:#b3261e}.muted{color:#66727d}
+pre{background:#f4f7f9;padding:.8rem;overflow:auto;font-size:.85rem}
+.tag{display:inline-block;border-radius:4px;padding:.1rem .45rem;margin:.1rem .2rem .1rem 0;font-size:.85rem}
+.tag.done{background:#e2f4e8;color:#0a7a3d}.tag.todo{background:#fdeceb;color:#b3261e}
+#msg{min-height:1.4rem;font-weight:600}
+</style>
+</head>
+<body>
+<h1>大坝巡检、缺陷与应急管理</h1>
+<p class="muted">渗流、位移等异常达到阈值时，缺陷须先制定应急预案并经巡检员、坝工双确认，才能从“确认”转入“修复”。</p>
+
+<fieldset><legend>当前身份</legend>
+<input id="actor" value="demo" placeholder="姓名">
+<select id="role">
+<option value="inspector">inspector（巡检员）</option>
+<option value="dam_engineer">dam_engineer（坝工）</option>
+<option value="emergency_manager" selected>emergency_manager（应急管理员）</option>
+<option value="viewer">viewer（查看者）</option>
+</select>
+<button onclick="loadItems()">刷新列表</button>
+<span id="msg"></span>
+</fieldset>
+
+<div class="card">
+<h3>缺陷列表</h3>
+<table><thead><tr><th>ID</th><th>标题</th><th>严重度</th><th>实测/阈值</th><th>状态</th><th>达阈值</th><th>预案</th></tr></thead>
+<tbody id="items"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table>
+</div>
+
+<div id="detail" style="display:none">
+<div class="card">
+<h3 id="dTitle">缺陷详情</h3>
+<div id="dMeta"></div>
+<h4>状态转换</h4>
+<select id="target">
+<option value="inspected">inspected（完成巡检）</option>
+<option value="defect_confirmed">defect_confirmed（确认缺陷）</option>
+<option value="repair" selected>repair（转入修复）</option>
+<option value="verified">verified（复检通过）</option>
+<option value="closed">closed（关闭）</option>
+</select>
+<button onclick="doTransition()">执行转换</button>
+<span class="muted" id="dVersion"></span>
+<div id="dBlockers"></div>
+</div>
+
+<div class="card">
+<h3>应急预案 <span id="pVersion" class="muted"></span></h3>
+<div id="pBody"></div>
+<h4>确认进度</h4>
+<div id="pProgress"></div>
+<button onclick="doConfirm()">确认当前版本（巡检员/坝工）</button>
+<h4>发布新版本（应急管理员，发布后旧确认失效）</h4>
+<textarea id="steps" placeholder="处置步骤，如：开启泄洪闸、加密监测频次…"></textarea>
+<textarea id="scope" placeholder="撤离范围，如：下游500米内村庄…"></textarea>
+<button onclick="savePlan()">保存新版本预案</button>
+</div>
+
+<div class="card">
+<h3>审计时间线</h3>
+<div id="audit" class="muted">仅 emergency_manager / viewer 可见</div>
+</div>
+</div>
+
+<script>
+let current=null;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'');
+function hdrs(){return{'Content-Type':'application/json','X-Actor':$('actor').value,'X-Role':$('role').value}}
+async function api(method,url,body){
+  const r=await fetch(url,{method,headers:hdrs(),body:body?JSON.stringify(body):undefined});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(data.message||data.error||r.status);
+  return data;
+}
+function say(text,bad){$('msg').textContent=text;$('msg').className=bad?'bad':'ok'}
+async function loadItems(){
+  try{
+    const d=await api('GET','/api/items');
+    const tb=$('items');tb.innerHTML='';
+    if(!d.items.length)tb.innerHTML='<tr><td colspan="7" class="muted">暂无缺陷</td></tr>';
+    for(const it of d.items){
+      const tr=document.createElement('tr');tr.dataset.id=it.id;
+      const plan=it.plan||{};
+      tr.innerHTML=`<td>${it.id}</td><td></td><td>${it.severity}</td><td>${it.quantity}/${it.threshold}</td><td>${it.status}</td>`+
+        `<td>${it.escalation_required?'<span class="bad">是</span>':'否'}</td>`+
+        `<td>${plan.version?('v'+plan.version+(plan.fully_confirmed?' ✅':' ⏳')):'—'}</td>`;
+      tr.children[1].textContent=it.title;
+      tr.onclick=()=>loadDetail(it.id);
+      tb.appendChild(tr);
+    }
+    say('列表已刷新');
+  }catch(e){say(e.message,true)}
+}
+async function loadDetail(id){
+  try{
+    current=await api('GET','/api/items/'+id);
+    renderDetail();loadAudit(id);
+    $('detail').style.display='block';
+  }catch(e){say(e.message,true)}
+}
+function renderDetail(){
+  const it=current,p=it.plan||{};
+  $('dTitle').textContent=`#${it.id} ${it.title}`;
+  $('dMeta').innerHTML=`状态 <b>${it.status}</b> ｜ 严重度 ${it.severity} ｜ 实测/阈值 ${it.quantity}/${it.threshold} ｜ `+
+    (it.escalation_required?'<span class="bad">已达处置阈值，转修复须预案双确认</span>':'<span class="muted">未达阈值，走原流程</span>');
+  $('dVersion').textContent=`（数据版本 v${it.version}，转换自动携带）`;
+  $('dBlockers').innerHTML=(p.blockers||[]).map(b=>`<div class="bad">⛔ 阻挡原因：${esc(b)}</div>`).join('');
+  if(p.version){
+    $('pVersion').textContent=`当前 v${p.version}（${p.updated_by} 发布于 ${p.updated_at}）`;
+    $('pBody').innerHTML=`<p><b>处置步骤：</b>${esc(p.steps)}</p><p><b>撤离范围：</b>${esc(p.evacuation_scope)}</p>`;
+    const confirmed=(p.confirmations||[]).map(c=>`<span class="tag done">✓ ${c.role_label} ${esc(c.actor)} ${c.created_at}</span>`).join('');
+    const pending=(p.pending_labels||[]).map(l=>`<span class="tag todo">✗ 待确认：${l}</span>`).join('');
+    $('pProgress').innerHTML=(confirmed+pending)||'<span class="muted">暂无确认</span>';
+  }else{
+    $('pVersion').textContent='尚未制定';
+    $('pBody').innerHTML='<p class="bad">尚未制定应急预案</p>';
+    $('pProgress').innerHTML='<span class="muted">无预案可确认</span>';
+  }
+}
+async function savePlan(){
+  if(!current)return;
+  try{
+    await api('POST',`/api/items/${current.id}/plan`,{steps:$('steps').value,evacuation_scope:$('scope').value});
+    say('预案已保存为新版本，旧确认已失效');await loadDetail(current.id);loadItems();
+  }catch(e){say(e.message,true)}
+}
+async function doConfirm(){
+  if(!current)return;
+  try{
+    const d=await api('POST',`/api/items/${current.id}/plan/confirm`);
+    say(d.plan.fully_confirmed?'已确认，预案获全员确认':'已确认，仍待：'+(d.plan.pending_labels||[]).join('、'));
+    await loadDetail(current.id);loadItems();
+  }catch(e){say(e.message,true)}
+}
+async function doTransition(){
+  if(!current)return;
+  try{
+    await api('POST',`/api/items/${current.id}/transition`,{target:$('target').value,expected_version:current.version});
+    say('转换成功');await loadDetail(current.id);loadItems();
+  }catch(e){say(e.message,true);renderDetail()}
+}
+async function loadAudit(id){
+  try{
+    const d=await api('GET','/api/audit?item_id='+id);
+    $('audit').innerHTML='<pre>'+d.events.map(e=>
+      `#${e.id} ${e.created_at} [${e.action}] ${esc(e.actor)} ${esc(JSON.stringify(e.detail))}`).join('\n')+'</pre>';
+  }catch(e){$('audit').textContent=e.message}
+}
+loadItems();
+</script>
+</body>
+</html>

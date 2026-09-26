@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (NotFoundError, ensure_role, normalize_severity,
+                     require_number, require_text)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, PLAN_CONFIRM_ROLES,
+                    PLAN_SAVE_ROLES, RECORD_ROLES, ROLE_LABELS, TITLE,
                     VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+                    plan_blockers, priority_score, response_deadline_hours,
+                    role_for_transition, validate_transition)
 
 
 class Service:
@@ -64,16 +66,89 @@ class Service:
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        escalation = escalation_required(
+            item["severity"], item["quantity"], item["threshold"])
+        plan = self.repository.get_current_plan(item_id)
+        confirmed_roles = self._confirmed_roles(item_id, plan)
+        blockers += plan_blockers(escalation, target, plan, confirmed_roles)
         if blockers:
             from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
-        self.repository.append_audit("transition", ENTITY, item_id, actor, {
-            "from": item["status"], "to": target,
+        detail = {"from": item["status"], "to": target,
+                  "escalation_required": escalation}
+        if target == "repair" and escalation and plan is not None:
+            detail["plan_version"] = plan["version"]
+        self.repository.append_audit("transition", ENTITY, item_id, actor, detail)
+        return self.enrich(updated)
+
+    def save_plan(self, item_id: int, payload: Dict[str, Any], actor: str,
+                  role: str) -> Dict[str, Any]:
+        ensure_role(role, PLAN_SAVE_ROLES)
+        actor = require_text(actor, "actor", 100)
+        steps = require_text(payload.get("steps"), "steps")
+        evacuation_scope = require_text(payload.get("evacuation_scope"), "evacuation_scope")
+        self.repository.get_item(item_id)
+        plan = self.repository.save_plan(item_id, steps, evacuation_scope, actor)
+        self.repository.append_audit("plan_save", ENTITY, item_id, actor, {
+            "plan_version": plan["version"], "steps": steps,
+            "evacuation_scope": evacuation_scope,
+        })
+        return self.get_plan_status(item_id, role)
+
+    def confirm_plan(self, item_id: int, actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, PLAN_CONFIRM_ROLES)
+        actor = require_text(actor, "actor", 100)
+        plan = self.repository.get_current_plan(item_id)
+        if plan is None:
+            raise NotFoundError("尚未制定应急预案")
+        _, created = self.repository.confirm_plan(item_id, plan["version"], role, actor)
+        if created:
+            self.repository.append_audit("plan_confirm", ENTITY, item_id, actor, {
+                "plan_version": plan["version"], "role": role,
+            })
+        return self.get_plan_status(item_id, role)
+
+    def get_plan_status(self, item_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        item = self.repository.get_item(item_id)
+        return {
+            "item_id": item_id,
             "escalation_required": escalation_required(
                 item["severity"], item["quantity"], item["threshold"]),
-        })
-        return self.enrich(updated)
+            "plan": self._plan_summary(item),
+        }
+
+    def _confirmed_roles(self, item_id: int, plan: Optional[Dict[str, Any]]) -> set:
+        if plan is None:
+            return set()
+        return {c["role"] for c in self.repository.plan_confirmations(
+            item_id, plan["version"])}
+
+    def _plan_summary(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        plan = self.repository.get_current_plan(item["id"])
+        confirmations = self.repository.plan_confirmations(
+            item["id"], plan["version"]) if plan else []
+        confirmed_roles = {c["role"] for c in confirmations}
+        pending = [r for r in PLAN_CONFIRM_ROLES if r not in confirmed_roles]
+        escalation = escalation_required(
+            item["severity"], item["quantity"], item["threshold"])
+        return {
+            "version": plan["version"] if plan else None,
+            "steps": plan["steps"] if plan else None,
+            "evacuation_scope": plan["evacuation_scope"] if plan else None,
+            "updated_by": plan["created_by"] if plan else None,
+            "updated_at": plan["created_at"] if plan else None,
+            "confirmations": [
+                {"role": c["role"], "role_label": ROLE_LABELS.get(c["role"], c["role"]),
+                 "actor": c["actor"], "created_at": c["created_at"]}
+                for c in confirmations
+            ],
+            "pending_roles": pending,
+            "pending_labels": [ROLE_LABELS.get(r, r) for r in pending],
+            "fully_confirmed": plan is not None and not pending,
+            "blockers": plan_blockers(escalation, "repair", plan, confirmed_roles),
+        }
 
     def get_item(self, item_id: int, role: str) -> Dict[str, Any]:
         self._view(role)
@@ -91,8 +166,7 @@ class Service:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
 
-    @staticmethod
-    def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
+    def enrich(self, item: Dict[str, Any]) -> Dict[str, Any]:
         result = dict(item)
         result["priority"] = priority_score(
             item["severity"], item["quantity"], item["threshold"])
@@ -100,4 +174,5 @@ class Service:
             item["severity"], item["quantity"], item["threshold"])
         result["escalation_required"] = escalation_required(
             item["severity"], item["quantity"], item["threshold"])
+        result["plan"] = self._plan_summary(item)
         return result

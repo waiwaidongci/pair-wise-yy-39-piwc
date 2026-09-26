@@ -3,6 +3,7 @@ from .domain import ConflictError, ValidationError
 TITLE='大坝巡检、缺陷与应急管理'; ENTITY='大坝缺陷'; ID_PREFIX='DS'
 SEVERITIES=['observation', 'minor', 'major', 'emergency']; STATES=['planned', 'inspected', 'defect_confirmed', 'repair', 'verified', 'closed']; TRANSITIONS={'planned': ['inspected'], 'inspected': ['defect_confirmed'], 'defect_confirmed': ['repair'], 'repair': ['verified'], 'verified': ['closed'], 'closed': []}; TRANSITION_ROLES={'inspected': ['inspector'], 'defect_confirmed': ['dam_engineer'], 'repair': ['dam_engineer'], 'verified': ['inspector'], 'closed': ['emergency_manager']}
 CREATE_ROLES=set(['inspector']); RECORD_ROLES=set(['inspector', 'dam_engineer']); AUDIT_ROLES=set(['emergency_manager', 'viewer']); VIEW_ROLES=set(['inspector', 'dam_engineer', 'emergency_manager', 'viewer'])
+PLAN_SAVE_ROLES=set(['emergency_manager']); PLAN_CONFIRM_ROLES=['inspector', 'dam_engineer']; ROLE_LABELS={'inspector': '巡检员', 'dam_engineer': '坝工', 'emergency_manager': '应急管理员', 'viewer': '查看者'}
 SEVERITY_WEIGHT={'observation': 1.0, 'minor': 3.0, 'major': 6.0, 'emergency': 9.0}; DEADLINE_HOURS={'observation': 72, 'minor': 24, 'major': 8, 'emergency': 4}; TERMINAL_STATES=set(['closed'])
 def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0):
     if severity not in SEVERITY_WEIGHT: raise ValidationError("unknown severity")
@@ -19,4 +20,10 @@ def validate_transition(current,target):
     if current not in STATES or target not in STATES: raise ValidationError("未知状态")
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
+def plan_blockers(escalation,target,plan,confirmed_roles):
+    if not escalation or target!='repair': return []
+    if plan is None: return ['达到处置阈值，尚未制定应急预案']
+    missing=[ROLE_LABELS.get(role,role) for role in PLAN_CONFIRM_ROLES if role not in confirmed_roles]
+    if missing: return [f"应急预案v{plan['version']}未获全员确认，待确认：{'、'.join(missing)}"]
+    return []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))

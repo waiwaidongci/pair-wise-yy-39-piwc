@@ -54,6 +54,25 @@ class Repository:
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, external_ref)
                 );
+                CREATE TABLE IF NOT EXISTS plans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    version INTEGER NOT NULL,
+                    steps TEXT NOT NULL,
+                    evacuation_scope TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(item_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS plan_confirmations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    plan_version INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(item_id, plan_version, role)
+                );
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action TEXT NOT NULL,
@@ -156,6 +175,79 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def save_plan(self, item_id: int, steps: str, evacuation_scope: str,
+                  actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.get_item(item_id)
+            row = self.conn.execute(
+                "SELECT MAX(version) AS v FROM plans WHERE item_id=?", (item_id,)
+            ).fetchone()
+            version = (row["v"] or 0) + 1
+            self.conn.execute(
+                """INSERT INTO plans(item_id, version, steps, evacuation_scope,
+                   created_by, created_at) VALUES(?,?,?,?,?,?)""",
+                (item_id, version, steps, evacuation_scope, actor, now),
+            )
+        return self.get_plan(item_id, version)
+
+    def get_plan(self, item_id: int, version: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM plans WHERE item_id=? AND version=?",
+                (item_id, version),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("预案版本不存在")
+        return dict(row)
+
+    def get_current_plan(self, item_id: int) -> Optional[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM plans WHERE item_id=? ORDER BY version DESC LIMIT 1",
+                (item_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_plans(self, item_id: int) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM plans WHERE item_id=? ORDER BY version DESC", (item_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def confirm_plan(self, item_id: int, plan_version: int, role: str,
+                     actor: str) -> tuple:
+        now = utc_now()
+        with self._lock:
+            try:
+                with self.conn:
+                    self.conn.execute(
+                        """INSERT INTO plan_confirmations(item_id, plan_version, role,
+                           actor, created_at) VALUES(?,?,?,?,?)""",
+                        (item_id, plan_version, role, actor, now),
+                    )
+                created = True
+            except sqlite3.IntegrityError:
+                created = False
+            row = self.conn.execute(
+                """SELECT * FROM plan_confirmations
+                   WHERE item_id=? AND plan_version=? AND role=?""",
+                (item_id, plan_version, role),
+            ).fetchone()
+        return dict(row), created
+
+    def plan_confirmations(self, item_id: int, plan_version: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM plan_confirmations
+                   WHERE item_id=? AND plan_version=? ORDER BY id""",
+                (item_id, plan_version),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

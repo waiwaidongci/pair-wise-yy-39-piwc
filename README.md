@@ -30,9 +30,12 @@ python3 app.py --db ./data.db --port 8316
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
-- `GET /api/audit`
+- `GET /api/items/{id}/plan`，查看当前预案版本、确认进度和阻挡原因
+- `POST /api/items/{id}/plan`，应急管理员保存新版本预案（处置步骤+撤离范围），保存后旧确认失效
+- `POST /api/items/{id}/plan/confirm`，巡检员或坝工确认当前版本预案
+- `GET /api/audit`，支持`?item_id=`按缺陷过滤
 
-允许角色：inspector, dam_engineer, emergency_manager, viewer。异常值比控制阈值越高，缺陷优先级越高；应急处置缺陷必须完成复检并记录证据后才能关闭。
+允许角色：inspector, dam_engineer, emergency_manager, viewer。异常值比控制阈值越高，缺陷优先级越高；应急处置缺陷必须完成复检并记录证据后才能关闭。达到阈值的缺陷（emergency或实测值≥阈值）从`defect_confirmed`转入`repair`前，必须已制定应急预案且当前版本获巡检员、坝工双确认；管理员每次改版都会使旧确认失效，未达阈值的缺陷仍走原流程。预案改版、确认和放行均写入SHA-256审计链。
 
 ## 测试
 
